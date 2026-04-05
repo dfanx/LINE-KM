@@ -34,3 +34,9 @@ desktop.ini
 
 # Logs
 *.log
+
+#其他
+instructions.md
+plan.md
+spec.md
+TODO.md

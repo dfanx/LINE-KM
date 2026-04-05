@@ -3,6 +3,7 @@
 import json
 import logging
 import re
+from urllib.parse import quote
 
 from google import genai
 from google.genai import types
@@ -106,11 +107,37 @@ class GeminiClient:
         return self._parse_response(response.text)
 
     async def _fetch_url(self, url: str) -> tuple[str, str]:
-        """Fetch and extract readable content from a URL."""
-        async with httpx.AsyncClient(follow_redirects=True, timeout=15.0) as client:
+        """Fetch and extract readable content from a URL. Never raises — returns fallback on failure."""
+        # Try regular HTML fetch
+        try:
+            return await self._fetch_html(url)
+        except Exception as e:
+            logger.warning("FETCH_HTML_FAILED: url=%s err=%s", url, e)
+
+        # YouTube oEmbed fallback
+        if "youtube.com" in url or "youtu.be" in url:
+            try:
+                return await self._fetch_youtube_oembed(url)
+            except Exception as e:
+                logger.warning("FETCH_OEMBED_FAILED: url=%s err=%s", url, e)
+
+        # Last resort — let Gemini work with URL alone
+        return url, f"（無法擷取該網頁的內容，請根據網址盡可能分析）\n網址：{url}"
+
+    async def _fetch_html(self, url: str) -> tuple[str, str]:
+        """Fetch and parse HTML content from a URL."""
+        async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
             resp = await client.get(
                 url,
-                headers={"User-Agent": "Mozilla/5.0 (compatible; KnowledgeBot/1.0)"},
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/131.0.0.0 Safari/537.36"
+                    ),
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+                },
             )
             resp.raise_for_status()
 
@@ -120,10 +147,13 @@ class GeminiClient:
 
         title = soup.title.string.strip() if soup.title and soup.title.string else url
 
+        # Extract og:description / meta description
         meta_desc = ""
-        meta_tag = soup.find("meta", attrs={"name": "description"})
-        if meta_tag and meta_tag.get("content"):
-            meta_desc = str(meta_tag["content"])
+        for attr in [{"property": "og:description"}, {"name": "description"}]:
+            meta_tag = soup.find("meta", attrs=attr)
+            if meta_tag and meta_tag.get("content"):
+                meta_desc = str(meta_tag["content"])
+                break
 
         text = soup.get_text(separator="\n", strip=True)
         lines = [line.strip() for line in text.splitlines() if line.strip()]
@@ -133,3 +163,15 @@ class GeminiClient:
             content = f"描述：{meta_desc}\n\n{content}"
 
         return title, content[:8000]
+
+    async def _fetch_youtube_oembed(self, url: str) -> tuple[str, str]:
+        """Fetch YouTube video metadata via oEmbed API."""
+        oembed_url = f"https://www.youtube.com/oembed?url={quote(url, safe='')}&format=json"
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(oembed_url)
+            resp.raise_for_status()
+            data = resp.json()
+
+        title = data.get("title", "YouTube Video")
+        author = data.get("author_name", "")
+        return title, f"YouTube 影片\n標題：{title}\n作者：{author}\n網址：{url}"

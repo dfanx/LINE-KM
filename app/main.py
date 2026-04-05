@@ -32,8 +32,8 @@ _settings: Settings | None = None
 LINE_REPLY_URL = "https://api.line.me/v2/bot/message/reply"
 LINE_CONTENT_URL = "https://api-data.line.me/v2/bot/message/{message_id}/content"
 URL_PATTERN = re.compile(r"^https?://\S+$")
-KM_EDIT_PATTERN = re.compile(r"^#修改\s+(KM\d{3})\s+(.+)$", re.DOTALL)
-KM_DELETE_PATTERN = re.compile(r"^#刪除\s+(KM\d{3})\s*$")
+KM_EDIT_PATTERN = re.compile(r"^#修改\s+(KM\d{3})\s+(.+)$", re.DOTALL | re.IGNORECASE)
+KM_DELETE_PATTERN = re.compile(r"^#刪除\s+(KM\d{3})\s*$", re.IGNORECASE)
 
 
 @asynccontextmanager
@@ -110,6 +110,10 @@ async def _handle_message(event: MessageEvent):
                 await _handle_edit(m.group(1).upper(), m.group(2).strip(), reply_token, trace)
             elif (m := KM_DELETE_PATTERN.match(text)):
                 await _handle_delete(m.group(1).upper(), reply_token, trace)
+            elif text.startswith("#修改"):
+                await _reply(reply_token, "⚠️ 格式錯誤\n正確格式：#修改 KMxxx 修改指示\n範例：#修改 KM003 請加入更多細節")
+            elif text.startswith("#刪除"):
+                await _reply(reply_token, "⚠️ 格式錯誤\n正確格式：#刪除 KMxxx\n範例：#刪除 KM003")
             elif URL_PATTERN.match(text):
                 await _handle_url(text, reply_token, trace)
             else:
@@ -179,6 +183,25 @@ async def _handle_delete(km_id: str, reply_token: str, trace: str):
 
 async def _handle_ask(question: str, reply_token: str, trace: str):
     logger.info("HANDLE_ASK: trace=%s q=%s", trace, question[:50])
+
+    # Try index-based search first (fast: 1 API call)
+    index = await gdrive.load_index()
+    if index:
+        context_parts = []
+        for km_id, entry in sorted(index.items()):
+            context_parts.append(
+                f"📄 {entry['filename']} ({km_id}):\n"
+                f"標題：{entry['title']}\n"
+                f"標籤：{', '.join(entry.get('tags', []))}\n"
+                f"摘要：{entry['summary']}"
+            )
+        context = "\n\n---\n\n".join(context_parts)
+        answer = await gemini.ask_knowledge(question, context)
+        await _reply(reply_token, answer)
+        logger.info("HANDLE_ASK_DONE: trace=%s index_entries=%d", trace, len(index))
+        return
+
+    # Fallback: Drive search (for edge cases where index is empty)
     files = await gdrive.search_files(question)
 
     if not files:
