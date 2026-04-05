@@ -79,10 +79,11 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             continue
 
         user_id = event.source.user_id
-        if user_id not in _settings.allowed_user_ids:
+        if _settings.allowed_user_ids and user_id not in _settings.allowed_user_ids:
             logger.warning("AUTH_DENIED: user_id=%s", user_id)
             continue
 
+        logger.info("ACCEPTED: user_id=%s", user_id)
         background_tasks.add_task(_handle_message, event)
 
     return "OK"

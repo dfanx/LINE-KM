@@ -1,5 +1,6 @@
 # === 機密檔案（嚴禁上傳）===
 auth.md
+env.yaml
 
 # Google OAuth credentials
 token.json
