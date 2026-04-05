@@ -128,9 +128,7 @@ async def _handle_message(event: MessageEvent):
 async def _handle_text(text: str, reply_token: str, trace: str):
     logger.info("HANDLE_TEXT: trace=%s len=%d", trace, len(text))
     result = await gemini.process_text(text)
-    km_id = await gdrive.get_next_km_id()
-    filename = f"{km_id}_{result['suggested_filename']}"
-    await gdrive.upload_markdown(filename, result["markdown_content"])
+    km_id, filename = await gdrive.upload_with_km_id(result["suggested_filename"], result["markdown_content"])
     await _reply(reply_token, _format_reply(result, km_id))
     logger.info("HANDLE_TEXT_DONE: trace=%s file=%s", trace, filename)
 
@@ -138,9 +136,7 @@ async def _handle_text(text: str, reply_token: str, trace: str):
 async def _handle_url(url: str, reply_token: str, trace: str):
     logger.info("HANDLE_URL: trace=%s url=%s", trace, url)
     result = await gemini.process_url(url)
-    km_id = await gdrive.get_next_km_id()
-    filename = f"{km_id}_{result['suggested_filename']}"
-    await gdrive.upload_markdown(filename, result["markdown_content"])
+    km_id, filename = await gdrive.upload_with_km_id(result["suggested_filename"], result["markdown_content"])
     await _reply(reply_token, _format_reply(result, km_id))
     logger.info("HANDLE_URL_DONE: trace=%s file=%s", trace, filename)
 
@@ -149,9 +145,7 @@ async def _handle_image(message_id: str, reply_token: str, trace: str):
     logger.info("HANDLE_IMAGE: trace=%s msg_id=%s", trace, message_id)
     image_bytes, mime_type = await _download_content(message_id)
     result = await gemini.process_image(image_bytes, mime_type)
-    km_id = await gdrive.get_next_km_id()
-    filename = f"{km_id}_{result['suggested_filename']}"
-    await gdrive.upload_markdown(filename, result["markdown_content"])
+    km_id, filename = await gdrive.upload_with_km_id(result["suggested_filename"], result["markdown_content"])
     await _reply(reply_token, _format_reply(result, km_id))
     logger.info("HANDLE_IMAGE_DONE: trace=%s file=%s", trace, filename)
 

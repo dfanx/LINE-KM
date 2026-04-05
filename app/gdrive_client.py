@@ -15,6 +15,9 @@ logger = logging.getLogger(__name__)
 
 TOKEN_URI = "https://oauth2.googleapis.com/token"
 
+# Lock to prevent concurrent KM ID assignment race condition
+_km_id_lock = asyncio.Lock()
+
 
 def _sanitize_query(query: str) -> str:
     """Sanitize search query to prevent injection in Drive API query string."""
@@ -38,7 +41,7 @@ class GDriveClient:
     # ─── KM ID management ────────────────────────────────────────────────
 
     async def get_next_km_id(self) -> str:
-        """Scan KM-DATA folder for highest KMxxx number and return next."""
+        """Scan KM-DATA folder for highest KMxxx number and return next. Uses lock to prevent race condition."""
 
         def _scan() -> str:
             results = (
@@ -57,7 +60,34 @@ class GDriveClient:
                     max_num = max(max_num, int(m.group(1)))
             return f"KM{max_num + 1:03d}"
 
-        return await asyncio.to_thread(_scan)
+        async with _km_id_lock:
+            km_id = await asyncio.to_thread(_scan)
+            return km_id
+
+    async def upload_with_km_id(self, suggested_filename: str, content: str) -> tuple[str, str]:
+        """Atomically assign KM ID and upload. Returns (km_id, full_filename)."""
+        async with _km_id_lock:
+            km_id = await asyncio.to_thread(self._scan_max_km_id)
+            filename = f"{km_id}_{suggested_filename}"
+            await asyncio.to_thread(self._do_upload, filename, content)
+            return km_id, filename
+
+    def _scan_max_km_id(self) -> str:
+        results = (
+            self._service.files()
+            .list(
+                q=f"'{self.folder_id}' in parents and trashed = false",
+                fields="files(name)",
+                pageSize=1000,
+            )
+            .execute()
+        )
+        max_num = 0
+        for f in results.get("files", []):
+            m = re.match(r"^KM(\d{3})_", f["name"])
+            if m:
+                max_num = max(max_num, int(m.group(1)))
+        return f"KM{max_num + 1:03d}"
 
     async def find_file_by_km_id(self, km_id: str) -> dict | None:
         """Find a file by KM ID prefix (e.g. 'KM003'). Returns {id, name} or None."""
@@ -88,26 +118,25 @@ class GDriveClient:
 
     async def upload_markdown(self, filename: str, content: str) -> str:
         """Upload a .md file to KM-DATA folder. Returns file ID."""
+        return await asyncio.to_thread(self._do_upload, filename, content)
 
-        def _upload() -> str:
-            file_metadata = {
-                "name": filename,
-                "parents": [self.folder_id],
-                "mimeType": "text/plain",
-            }
-            media = MediaIoBaseUpload(
-                BytesIO(content.encode("utf-8")),
-                mimetype="text/plain",
-            )
-            result = (
-                self._service.files()
-                .create(body=file_metadata, media_body=media, fields="id, name")
-                .execute()
-            )
-            logger.info("GDRIVE_UPLOAD: %s (id=%s)", result["name"], result["id"])
-            return result["id"]
-
-        return await asyncio.to_thread(_upload)
+    def _do_upload(self, filename: str, content: str) -> str:
+        file_metadata = {
+            "name": filename,
+            "parents": [self.folder_id],
+            "mimeType": "text/plain",
+        }
+        media = MediaIoBaseUpload(
+            BytesIO(content.encode("utf-8")),
+            mimetype="text/plain",
+        )
+        result = (
+            self._service.files()
+            .create(body=file_metadata, media_body=media, fields="id, name")
+            .execute()
+        )
+        logger.info("GDRIVE_UPLOAD: %s (id=%s)", result["name"], result["id"])
+        return result["id"]
 
     async def search_files(self, query: str) -> list[dict]:
         """Search for files inside KM-DATA folder. Uses fullText first, falls back to listing recent files."""
