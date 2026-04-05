@@ -4,7 +4,8 @@ import json
 import logging
 import re
 
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 import httpx
 from bs4 import BeautifulSoup
 
@@ -16,19 +17,9 @@ logger = logging.getLogger(__name__)
 
 class GeminiClient:
     def __init__(self, settings: Settings) -> None:
-        genai.configure(api_key=settings.gemini_api_key)
-        self.model = genai.GenerativeModel(
-            model_name=settings.gemini_model,
-            system_instruction=get_system_prompt(),
-            generation_config=genai.GenerationConfig(
-                response_mime_type="application/json",
-                temperature=0.3,
-            ),
-        )
-        self.ask_model = genai.GenerativeModel(
-            model_name=settings.gemini_model,
-            generation_config=genai.GenerationConfig(temperature=0.5),
-        )
+        self._client = genai.Client(api_key=settings.gemini_api_key)
+        self._model = settings.gemini_model
+        self._system_prompt = get_system_prompt()
 
     def _parse_response(self, text: str) -> dict:
         """Parse JSON from Gemini response."""
@@ -46,7 +37,15 @@ class GeminiClient:
     async def process_text(self, text: str) -> dict:
         """Process plain text input into knowledge note."""
         logger.info("GEMINI_PROCESS_TEXT: len=%d", len(text))
-        response = await self.model.generate_content_async(text)
+        response = await self._client.aio.models.generate_content(
+            model=self._model,
+            contents=text,
+            config=types.GenerateContentConfig(
+                system_instruction=self._system_prompt,
+                response_mime_type="application/json",
+                temperature=0.3,
+            ),
+        )
         return self._parse_response(response.text)
 
     async def process_url(self, url: str) -> dict:
@@ -54,22 +53,40 @@ class GeminiClient:
         logger.info("GEMINI_PROCESS_URL: %s", url)
         page_title, content = await self._fetch_url(url)
         prompt = get_url_prompt(url=url, page_title=page_title, content=content)
-        response = await self.model.generate_content_async(prompt)
+        response = await self._client.aio.models.generate_content(
+            model=self._model,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=self._system_prompt,
+                response_mime_type="application/json",
+                temperature=0.3,
+            ),
+        )
         return self._parse_response(response.text)
 
     async def process_image(self, image_bytes: bytes, mime_type: str = "image/jpeg") -> dict:
         """Process image with Vision for OCR and content understanding."""
         logger.info("GEMINI_PROCESS_IMAGE: size=%d mime=%s", len(image_bytes), mime_type)
-        image_part = {"mime_type": mime_type, "data": image_bytes}
-        response = await self.model.generate_content_async([IMAGE_PROMPT, image_part])
+        image_part = types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
+        response = await self._client.aio.models.generate_content(
+            model=self._model,
+            contents=[IMAGE_PROMPT, image_part],
+            config=types.GenerateContentConfig(
+                system_instruction=self._system_prompt,
+                response_mime_type="application/json",
+                temperature=0.3,
+            ),
+        )
         return self._parse_response(response.text)
 
     async def ask_knowledge(self, question: str, context: str) -> str:
         """Answer a question based on knowledge base context."""
         logger.info("GEMINI_ASK: q=%s", question[:50])
         prompt = get_ask_prompt(context)
-        response = await self.ask_model.generate_content_async(
-            f"{prompt}\n\n使用者問題：{question}"
+        response = await self._client.aio.models.generate_content(
+            model=self._model,
+            contents=f"{prompt}\n\n使用者問題：{question}",
+            config=types.GenerateContentConfig(temperature=0.5),
         )
         return response.text
 
