@@ -77,6 +77,41 @@ ASK_SYSTEM_PROMPT = """你是個人知識庫助理。根據以下知識庫文件
 {context}
 """
 
+REVISE_PROMPT = """以下是一篇既有的知識筆記，使用者要求修改。請根據修改指示重新整理此筆記。
+
+修改指示：{instruction}
+
+原始內容：
+{original_content}
+"""
+
+HELP_TEXT = """📖 LINE KM 知識庫指令一覽
+
+💬 直接傳送文字
+→ AI 整理成知識筆記並存檔
+
+🔗 傳送網址
+→ 擷取網頁內容，整理成筆記
+
+🖼️ 傳送圖片
+→ OCR 識別 + 知識整理
+
+🔍 #ask 問題
+→ 搜尋知識庫回答問題
+  例：#ask 什麼是 RAG？
+
+✏️ #修改 KMxxx 修改指示
+→ 修改指定編號的筆記
+  例：#修改 KM003 請再簡潔一點著重醫療部分
+
+🗑️ #刪除 KMxxx
+→ 刪除指定編號的筆記
+  例：#刪除 KM004
+
+📋 #help
+→ 顯示本說明
+"""
+
 
 def get_system_prompt() -> str:
     today = datetime.date.today().isoformat()
@@ -91,3 +126,9 @@ def get_url_prompt(url: str, page_title: str, content: str) -> str:
 
 def get_ask_prompt(context: str) -> str:
     return ASK_SYSTEM_PROMPT.format(context=context[:12000])
+
+
+def get_revise_prompt(instruction: str, original_content: str) -> str:
+    return REVISE_PROMPT.format(
+        instruction=instruction, original_content=original_content[:8000]
+    )

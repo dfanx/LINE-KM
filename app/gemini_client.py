@@ -10,7 +10,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from config.settings import Settings
-from app.prompts import get_system_prompt, get_url_prompt, get_ask_prompt, IMAGE_PROMPT
+from app.prompts import get_system_prompt, get_url_prompt, get_ask_prompt, get_revise_prompt, IMAGE_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +89,21 @@ class GeminiClient:
             config=types.GenerateContentConfig(temperature=0.5),
         )
         return response.text
+
+    async def revise_knowledge(self, instruction: str, original_content: str) -> dict:
+        """Revise existing knowledge note based on user instruction."""
+        logger.info("GEMINI_REVISE: instruction=%s", instruction[:50])
+        prompt = get_revise_prompt(instruction, original_content)
+        response = await self._client.aio.models.generate_content(
+            model=self._model,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=self._system_prompt,
+                response_mime_type="application/json",
+                temperature=0.3,
+            ),
+        )
+        return self._parse_response(response.text)
 
     async def _fetch_url(self, url: str) -> tuple[str, str]:
         """Fetch and extract readable content from a URL."""

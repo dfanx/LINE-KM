@@ -15,6 +15,7 @@ from linebot.v3.webhooks import MessageEvent, TextMessageContent, ImageMessageCo
 from config.settings import get_settings, Settings
 from app.gemini_client import GeminiClient
 from app.gdrive_client import GDriveClient
+from app.prompts import HELP_TEXT
 
 logging.basicConfig(
     level=logging.INFO,
@@ -31,6 +32,8 @@ _settings: Settings | None = None
 LINE_REPLY_URL = "https://api.line.me/v2/bot/message/reply"
 LINE_CONTENT_URL = "https://api-data.line.me/v2/bot/message/{message_id}/content"
 URL_PATTERN = re.compile(r"^https?://\S+$")
+KM_EDIT_PATTERN = re.compile(r"^#修改\s+(KM\d{3})\s+(.+)$", re.DOTALL)
+KM_DELETE_PATTERN = re.compile(r"^#刪除\s+(KM\d{3})\s*$")
 
 
 @asynccontextmanager
@@ -99,8 +102,14 @@ async def _handle_message(event: MessageEvent):
     try:
         if isinstance(message, TextMessageContent):
             text = message.text.strip()
-            if text.lower().startswith("#ask "):
+            if text.lower() == "#help":
+                await _reply(reply_token, HELP_TEXT)
+            elif text.lower().startswith("#ask "):
                 await _handle_ask(text[5:], reply_token, trace)
+            elif (m := KM_EDIT_PATTERN.match(text)):
+                await _handle_edit(m.group(1).upper(), m.group(2).strip(), reply_token, trace)
+            elif (m := KM_DELETE_PATTERN.match(text)):
+                await _handle_delete(m.group(1).upper(), reply_token, trace)
             elif URL_PATTERN.match(text):
                 await _handle_url(text, reply_token, trace)
             else:
@@ -119,26 +128,59 @@ async def _handle_message(event: MessageEvent):
 async def _handle_text(text: str, reply_token: str, trace: str):
     logger.info("HANDLE_TEXT: trace=%s len=%d", trace, len(text))
     result = await gemini.process_text(text)
-    await gdrive.upload_markdown(result["suggested_filename"], result["markdown_content"])
-    await _reply(reply_token, _format_reply(result))
-    logger.info("HANDLE_TEXT_DONE: trace=%s file=%s", trace, result["suggested_filename"])
+    km_id = await gdrive.get_next_km_id()
+    filename = f"{km_id}_{result['suggested_filename']}"
+    await gdrive.upload_markdown(filename, result["markdown_content"])
+    await _reply(reply_token, _format_reply(result, km_id))
+    logger.info("HANDLE_TEXT_DONE: trace=%s file=%s", trace, filename)
 
 
 async def _handle_url(url: str, reply_token: str, trace: str):
     logger.info("HANDLE_URL: trace=%s url=%s", trace, url)
     result = await gemini.process_url(url)
-    await gdrive.upload_markdown(result["suggested_filename"], result["markdown_content"])
-    await _reply(reply_token, _format_reply(result))
-    logger.info("HANDLE_URL_DONE: trace=%s file=%s", trace, result["suggested_filename"])
+    km_id = await gdrive.get_next_km_id()
+    filename = f"{km_id}_{result['suggested_filename']}"
+    await gdrive.upload_markdown(filename, result["markdown_content"])
+    await _reply(reply_token, _format_reply(result, km_id))
+    logger.info("HANDLE_URL_DONE: trace=%s file=%s", trace, filename)
 
 
 async def _handle_image(message_id: str, reply_token: str, trace: str):
     logger.info("HANDLE_IMAGE: trace=%s msg_id=%s", trace, message_id)
     image_bytes, mime_type = await _download_content(message_id)
     result = await gemini.process_image(image_bytes, mime_type)
-    await gdrive.upload_markdown(result["suggested_filename"], result["markdown_content"])
-    await _reply(reply_token, _format_reply(result))
-    logger.info("HANDLE_IMAGE_DONE: trace=%s file=%s", trace, result["suggested_filename"])
+    km_id = await gdrive.get_next_km_id()
+    filename = f"{km_id}_{result['suggested_filename']}"
+    await gdrive.upload_markdown(filename, result["markdown_content"])
+    await _reply(reply_token, _format_reply(result, km_id))
+    logger.info("HANDLE_IMAGE_DONE: trace=%s file=%s", trace, filename)
+
+
+async def _handle_edit(km_id: str, instruction: str, reply_token: str, trace: str):
+    logger.info("HANDLE_EDIT: trace=%s km_id=%s", trace, km_id)
+    file_info = await gdrive.find_file_by_km_id(km_id)
+    if not file_info:
+        await _reply(reply_token, f"❌ 找不到編號 {km_id} 的筆記")
+        return
+
+    original = await gdrive.read_file_content(file_info["id"])
+    result = await gemini.revise_knowledge(instruction, original)
+    new_filename = f"{km_id}_{result['suggested_filename']}"
+    await gdrive.update_file(file_info["id"], new_filename, result["markdown_content"])
+    await _reply(reply_token, f"✏️ 已修改 {km_id}\n\n{result['line_display']}\n\n✅ 已更新：{new_filename}")
+    logger.info("HANDLE_EDIT_DONE: trace=%s file=%s", trace, new_filename)
+
+
+async def _handle_delete(km_id: str, reply_token: str, trace: str):
+    logger.info("HANDLE_DELETE: trace=%s km_id=%s", trace, km_id)
+    file_info = await gdrive.find_file_by_km_id(km_id)
+    if not file_info:
+        await _reply(reply_token, f"❌ 找不到編號 {km_id} 的筆記")
+        return
+
+    await gdrive.delete_file(file_info["id"])
+    await _reply(reply_token, f"🗑️ 已刪除 {km_id}\n📄 {file_info['name']}")
+    logger.info("HANDLE_DELETE_DONE: trace=%s file=%s", trace, file_info["name"])
 
 
 async def _handle_ask(question: str, reply_token: str, trace: str):
@@ -169,11 +211,12 @@ async def _handle_ask(question: str, reply_token: str, trace: str):
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
-def _format_reply(result: dict) -> str:
+def _format_reply(result: dict, km_id: str) -> str:
     importance = min(int(result.get("importance", 3)), 5)
     return (
         f"{result['line_display']}\n\n"
-        f"✅ 已存檔：{result['suggested_filename']}\n"
+        f"🏷️ 編號：{km_id}\n"
+        f"✅ 已存檔：{km_id}_{result['suggested_filename']}\n"
         f"⭐ 重要度：{'⭐' * importance}"
     )
 
